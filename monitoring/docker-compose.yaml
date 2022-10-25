@@ -6,8 +6,8 @@ x-logging:
   &loki-logging
   driver: "json-file"
   options:
-    max-size: "100m"
-    max-file: "10"
+    max-size: "100m"  # Log rotation
+    max-file: "10"  # Number of old log files
     tag: "{{.ImageName}}|{{.Name}}"
 
 
@@ -18,15 +18,30 @@ services:
     image: markovvn1/iu-devops:lab_python
     ports:
       - 8080:80
-    logging: *loki-logging
     networks: [apps]
+    mem_limit: 2048m
+    logging: *loki-logging
+    # Already has a healthcheck (see Dockerfile)
 
   app_php:
     image: markovvn1/iu-devops:lab_php
     ports:
       - 8081:80
-    logging: *loki-logging
     networks: [apps]
+    mem_limit: 1024m
+    logging: *loki-logging
+    # Already has a healthcheck (see Dockerfile)
+
+  app_php_metrics:  # collect nginx metrics for app_php and prepare them for Prometheus
+    image: nginx/nginx-prometheus-exporter:0.11.0
+    environment:
+      - SCRAPE_URI=http://app_php:3333/nginx_status
+      - TELEMETRY_PATH=/metrics
+      - NGINX_RETRIES=10
+    networks: [monitoring, apps]
+    mem_limit: 128m
+    logging: *loki-logging
+    # Didn't find any way to check health. This docker contains only compiled golang program (there is even no bash or sh)
 
   loki:
     image: grafana/loki:2.6.1
@@ -34,33 +49,61 @@ services:
       - loki-data:/tmp/loki/
     networks: [monitoring]
     command: -config.file=/etc/loki/local-config.yaml
+    mem_limit: 1024m
     logging: *loki-logging
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=3 --spider http://localhost:3100/ready || exit 1"]
 
   promtail:
     image: grafana/promtail:2.6.1
     volumes:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro  # To collect logs from containers
-      - promtail-data:/var/lib/promtail/positions
       - ./configs/promtail.yml:/etc/promtail/config.yml
+      - promtail-data:/var/lib/promtail/positions
     networks: [monitoring, apps]
     command: -config.file=/etc/promtail/config.yml
+    mem_limit: 1024m
     logging: *loki-logging
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/9080' || exit 1"]
+
+  prometheus:
+    image: prom/prometheus:v2.39.1
+    ports:
+      - 9090:9090
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks: [monitoring, apps]
+    mem_limit: 1024m
+    logging: *loki-logging
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=3 --spider http://localhost:9090/-/healthy || exit 1"]
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:9.2.1
     ports:
       - 3000:3000
     volumes:
       - grafana-data:/var/lib/grafana
       - ./configs/datasources:/etc/grafana/provisioning/datasources
     networks: [monitoring]
+    mem_limit: 1024m
     logging: *loki-logging
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/healthz || exit 1"]
 
 
 volumes:
   grafana-data: {}
   loki-data: {}
   promtail-data: {}
+  prometheus-data: {}
 
 
 networks:
